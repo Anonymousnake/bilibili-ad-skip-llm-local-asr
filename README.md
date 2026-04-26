@@ -75,8 +75,6 @@ B站视频内广告跳过（大模型）.txt
 ### 3. 可选：本地 ASR
 
 如果你希望在“无字幕视频”里也做较完整的识别，可以启用本地 ASR：
-
-- 推荐显卡：RTX 4060 8GB 及以上
 - 推荐模型路线：`faster-whisper`
 
 ## 使用方式
@@ -126,25 +124,6 @@ python -m venv .venv-asr
 
 如果返回 `ok: true`，说明本地服务已经正常运行。
 
-## 上传到 GitHub 时建议包含的文件
-
-建议上传：
-
-- `README.md`
-- `README-local-asr.md`
-- `requirements-local-asr.txt`
-- `local_asr_server.py`
-- `B站视频内广告跳过（大模型）.txt`
-
-## 不建议上传的文件
-
-不要上传：
-
-- `.venv-asr/`
-- `__pycache__/`
-- 模型缓存目录
-- 临时下载的音频文件
-- 你自己的 API Key、Token、Cookie
 
 ## 已知说明
 
