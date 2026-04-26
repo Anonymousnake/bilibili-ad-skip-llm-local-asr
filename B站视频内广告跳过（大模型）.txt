@@ -1,0 +1,1661 @@
+// ==UserScript==
+// @name         B站视频内广告跳过（大模型）
+// @namespace    http://tampermonkey.net/
+// @version      6.0
+// @description  结合标题/简介/评论/弹幕/字幕，识别并跳过B站视频植入广告；支持无字幕备用定位与整期推广识别。
+// @author       Anonymousnake
+// @license      MIT
+// @match        https://www.bilibili.com/video/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_deleteValue
+// @grant        GM_listValues
+// @grant        GM_addStyle
+// @connect      api.bilibili.com
+// @connect      comment.bilibili.com
+// @connect      api.openai.com
+// @connect      api.deepseek.com
+// @connect      generativelanguage.googleapis.com
+// @connect      api.anthropic.com
+// @connect      open.bigmodel.cn
+// @connect      *
+// @icon         https://img.picui.cn/free/2025/06/18/68524942bfc36.png
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const WbiUtils = {
+        mixinKeyEncTab: [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52],
+        getMixinKey(orig) { return this.mixinKeyEncTab.map(i => orig[i]).join('').slice(0, 32); },
+        md5(text) {
+            const rotateLeft = (value, shift) => (value << shift) | (value >>> (32 - shift));
+            const addUnsigned = (a, b) => {
+                const a4 = a & 0x40000000;
+                const b4 = b & 0x40000000;
+                const a8 = a & 0x80000000;
+                const b8 = b & 0x80000000;
+                const result = (a & 0x3FFFFFFF) + (b & 0x3FFFFFFF);
+                if (a4 & b4) return result ^ 0x80000000 ^ a8 ^ b8;
+                if (a4 | b4) return (result & 0x40000000) ? (result ^ 0xC0000000 ^ a8 ^ b8) : (result ^ 0x40000000 ^ a8 ^ b8);
+                return result ^ a8 ^ b8;
+            };
+            const f = (x, y, z) => (x & y) | ((~x) & z);
+            const g = (x, y, z) => (x & z) | (y & (~z));
+            const h = (x, y, z) => x ^ y ^ z;
+            const i = (x, y, z) => y ^ (x | (~z));
+            const ff = (a, b, c, d, x, s, ac) => addUnsigned(rotateLeft(addUnsigned(addUnsigned(a, f(b, c, d)), addUnsigned(x, ac)), s), b);
+            const gg = (a, b, c, d, x, s, ac) => addUnsigned(rotateLeft(addUnsigned(addUnsigned(a, g(b, c, d)), addUnsigned(x, ac)), s), b);
+            const hh = (a, b, c, d, x, s, ac) => addUnsigned(rotateLeft(addUnsigned(addUnsigned(a, h(b, c, d)), addUnsigned(x, ac)), s), b);
+            const ii = (a, b, c, d, x, s, ac) => addUnsigned(rotateLeft(addUnsigned(addUnsigned(a, i(b, c, d)), addUnsigned(x, ac)), s), b);
+            const convertToWordArray = str => {
+                const utf8 = unescape(encodeURIComponent(str));
+                const length = utf8.length;
+                const totalWords = (((length + 8) >>> 6) + 1) * 16;
+                const words = new Array(totalWords).fill(0);
+                for (let idx = 0; idx < length; idx++) words[idx >>> 2] |= utf8.charCodeAt(idx) << ((idx % 4) * 8);
+                words[length >>> 2] |= 0x80 << ((length % 4) * 8);
+                words[totalWords - 2] = length << 3;
+                words[totalWords - 1] = length >>> 29;
+                return words;
+            };
+            const wordToHex = value => {
+                let out = '';
+                for (let n = 0; n <= 3; n++) out += (`0${((value >>> (n * 8)) & 255).toString(16)}`).slice(-2);
+                return out;
+            };
+
+            const x = convertToWordArray(text);
+            let a = 0x67452301;
+            let b = 0xEFCDAB89;
+            let c = 0x98BADCFE;
+            let d = 0x10325476;
+
+            for (let k = 0; k < x.length; k += 16) {
+                const aa = a, bb = b, cc = c, dd = d;
+                a = ff(a, b, c, d, x[k], 7, 0xD76AA478); d = ff(d, a, b, c, x[k + 1], 12, 0xE8C7B756); c = ff(c, d, a, b, x[k + 2], 17, 0x242070DB); b = ff(b, c, d, a, x[k + 3], 22, 0xC1BDCEEE);
+                a = ff(a, b, c, d, x[k + 4], 7, 0xF57C0FAF); d = ff(d, a, b, c, x[k + 5], 12, 0x4787C62A); c = ff(c, d, a, b, x[k + 6], 17, 0xA8304613); b = ff(b, c, d, a, x[k + 7], 22, 0xFD469501);
+                a = ff(a, b, c, d, x[k + 8], 7, 0x698098D8); d = ff(d, a, b, c, x[k + 9], 12, 0x8B44F7AF); c = ff(c, d, a, b, x[k + 10], 17, 0xFFFF5BB1); b = ff(b, c, d, a, x[k + 11], 22, 0x895CD7BE);
+                a = ff(a, b, c, d, x[k + 12], 7, 0x6B901122); d = ff(d, a, b, c, x[k + 13], 12, 0xFD987193); c = ff(c, d, a, b, x[k + 14], 17, 0xA679438E); b = ff(b, c, d, a, x[k + 15], 22, 0x49B40821);
+                a = gg(a, b, c, d, x[k + 1], 5, 0xF61E2562); d = gg(d, a, b, c, x[k + 6], 9, 0xC040B340); c = gg(c, d, a, b, x[k + 11], 14, 0x265E5A51); b = gg(b, c, d, a, x[k], 20, 0xE9B6C7AA);
+                a = gg(a, b, c, d, x[k + 5], 5, 0xD62F105D); d = gg(d, a, b, c, x[k + 10], 9, 0x02441453); c = gg(c, d, a, b, x[k + 15], 14, 0xD8A1E681); b = gg(b, c, d, a, x[k + 4], 20, 0xE7D3FBC8);
+                a = gg(a, b, c, d, x[k + 9], 5, 0x21E1CDE6); d = gg(d, a, b, c, x[k + 14], 9, 0xC33707D6); c = gg(c, d, a, b, x[k + 3], 14, 0xF4D50D87); b = gg(b, c, d, a, x[k + 8], 20, 0x455A14ED);
+                a = gg(a, b, c, d, x[k + 13], 5, 0xA9E3E905); d = gg(d, a, b, c, x[k + 2], 9, 0xFCEFA3F8); c = gg(c, d, a, b, x[k + 7], 14, 0x676F02D9); b = gg(b, c, d, a, x[k + 12], 20, 0x8D2A4C8A);
+                a = hh(a, b, c, d, x[k + 5], 4, 0xFFFA3942); d = hh(d, a, b, c, x[k + 8], 11, 0x8771F681); c = hh(c, d, a, b, x[k + 11], 16, 0x6D9D6122); b = hh(b, c, d, a, x[k + 14], 23, 0xFDE5380C);
+                a = hh(a, b, c, d, x[k + 1], 4, 0xA4BEEA44); d = hh(d, a, b, c, x[k + 4], 11, 0x4BDECFA9); c = hh(c, d, a, b, x[k + 7], 16, 0xF6BB4B60); b = hh(b, c, d, a, x[k + 10], 23, 0xBEBFBC70);
+                a = hh(a, b, c, d, x[k + 13], 4, 0x289B7EC6); d = hh(d, a, b, c, x[k], 11, 0xEAA127FA); c = hh(c, d, a, b, x[k + 3], 16, 0xD4EF3085); b = hh(b, c, d, a, x[k + 6], 23, 0x04881D05);
+                a = hh(a, b, c, d, x[k + 9], 4, 0xD9D4D039); d = hh(d, a, b, c, x[k + 12], 11, 0xE6DB99E5); c = hh(c, d, a, b, x[k + 15], 16, 0x1FA27CF8); b = hh(b, c, d, a, x[k + 2], 23, 0xC4AC5665);
+                a = ii(a, b, c, d, x[k], 6, 0xF4292244); d = ii(d, a, b, c, x[k + 7], 10, 0x432AFF97); c = ii(c, d, a, b, x[k + 14], 15, 0xAB9423A7); b = ii(b, c, d, a, x[k + 5], 21, 0xFC93A039);
+                a = ii(a, b, c, d, x[k + 12], 6, 0x655B59C3); d = ii(d, a, b, c, x[k + 3], 10, 0x8F0CCC92); c = ii(c, d, a, b, x[k + 10], 15, 0xFFEFF47D); b = ii(b, c, d, a, x[k + 1], 21, 0x85845DD1);
+                a = ii(a, b, c, d, x[k + 8], 6, 0x6FA87E4F); d = ii(d, a, b, c, x[k + 15], 10, 0xFE2CE6E0); c = ii(c, d, a, b, x[k + 6], 15, 0xA3014314); b = ii(b, c, d, a, x[k + 13], 21, 0x4E0811A1);
+                a = ii(a, b, c, d, x[k + 4], 6, 0xF7537E82); d = ii(d, a, b, c, x[k + 11], 10, 0xBD3AF235); c = ii(c, d, a, b, x[k + 2], 15, 0x2AD7D2BB); b = ii(b, c, d, a, x[k + 9], 21, 0xEB86D391);
+                a = addUnsigned(a, aa); b = addUnsigned(b, bb); c = addUnsigned(c, cc); d = addUnsigned(d, dd);
+            }
+
+            return `${wordToHex(a)}${wordToHex(b)}${wordToHex(c)}${wordToHex(d)}`;
+        },
+        async getWbiKeys() {
+            const wbiCache = GM_getValue('wbi_cache');
+            const today = new Date().setHours(0, 0, 0, 0);
+            if (wbiCache && wbiCache.timestamp >= today) return [wbiCache.img_key, wbiCache.sub_key];
+            const res = await fetch('https://api.bilibili.com/x/web-interface/nav', {
+                headers: { 'User-Agent': navigator.userAgent, 'Referer': 'https://www.bilibili.com/' },
+                credentials: 'include'
+            });
+            const data = await res.json();
+            if (data.code !== 0) throw new Error(data.message);
+            const imgKey = data.data.wbi_img.img_url.split('/').pop().split('.')[0];
+            const subKey = data.data.wbi_img.sub_url.split('/').pop().split('.')[0];
+            GM_setValue('wbi_cache', { img_key: imgKey, sub_key: subKey, timestamp: today });
+            return [imgKey, subKey];
+        },
+        async encWbi(params) {
+            const [imgKey, subKey] = await this.getWbiKeys();
+            const mixinKey = this.getMixinKey(imgKey + subKey);
+            const newParams = { ...params, wts: Math.floor(Date.now() / 1000) };
+            const query = Object.keys(newParams).sort().map(k =>
+                `${k}=${encodeURIComponent(String(newParams[k]).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '').replace(/[&?:\/=]/g, ''))}`
+            ).join('&');
+            return { ...newParams, w_rid: this.md5(query + mixinKey) };
+        }
+    };
+
+    const settingsIconBase64 = 'https://img.picui.cn/free/2025/06/18/68524942bfc36.png';
+    const API_PROVIDERS = {
+        openai: { defaultUrl: 'https://api.openai.com/v1' },
+        deepseek: { defaultUrl: 'https://api.deepseek.com/v1' },
+        gemini: { defaultUrl: 'https://generativelanguage.googleapis.com/v1beta' },
+        anthropic: { defaultUrl: 'https://api.anthropic.com/v1' },
+        custom: { defaultUrl: '' }
+    };
+
+    const DEFAULT_SETTINGS = {
+        theme: 'light',
+        floatingPosition: { x: 50, y: 50 },
+        apiProvider: 'custom',
+        baseUrl: '',
+        apiKey: '',
+        model: '',
+        fallbackModel: '',
+        defaultSkip: true,
+        probabilityThreshold: 70,
+        durationPenalty: 5,
+        minAdDuration: 20,
+        maxAdDuration: 300,
+        maxDanmakuCount: 250,
+        minDanmakuForFullAnalysis: 10,
+        enableWhitelist: false,
+        whitelistRegex: false,
+        whitelist: ['分', '秒', '空降', '指路', '跳过', '广告', '快进', '时间'],
+        enableBlacklist: true,
+        blacklistRegex: false,
+        blacklist: ['正片', '省流', '总结', '回顾', '分享'],
+        enableLocalAsr: false,
+        localAsrUrl: 'http://127.0.0.1:5037/asr/transcribe',
+        localAsrTimeoutMs: 180000,
+        localAsrMaxVideoMinutes: 20,
+        localAsrProviderLabel: 'faster-whisper',
+        agentPrompt: `### Agent Prompt
+**角色：**
+专门检测Bilibili视频商业推广内容的高级AI分析师。
+
+**任务：**
+综合视频元数据、评论、弹幕和字幕，判断视频属于以下哪一类：
+1. inserted_ad：正常视频中途插入一段商业推广，可给出 start/end。
+2. full_video_promo：整期视频本身就是品牌向推广、商单评测、导购型内容，不应伪造局部 start/end。
+3. normal：正常视频或证据不足。
+
+**核心原则：**
+- inserted_ad：前后存在明显主线切换，中间插入商业推广，再切回主线。
+- full_video_promo：标题、简介、置顶评论与字幕主体持续围绕同一产品/品牌/型号展开，长期讲卖点、功能、实测、参数、体验、购买/活动/售后信息。
+- normal：不足以证明是商业推广，或视频本来就是泛科普/泛评测且无明显转化导向。
+
+**强规则：**
+- 若评论区出现商品推广链接、data-type="goods"、data-goods-url、track_id、creative_id、adtype、utm 等广告归因特征，或“点击蓝链”“粉丝专属福利”“立减”“首单补贴”“现金券”等强推广文案，则该评论为商业推广评论。
+- 一旦评论区强规则命中，不要否认其广告属性。
+- 若字幕缺失但评论强命中，可参考评论关键词在弹幕中的时间聚集区作为 inserted_ad 的辅助证据；若证据不足，不要编造时间。
+若你已经能定位到明确的 pivot_sentence 和局部 start/end，则优先输出 type="inserted_ad"；
+只有当推广内容贯穿全片、无法分出独立局部区间时，才输出 type="full_video_promo"。
+
+**输出格式（纯JSON）：**
+{
+  "type": "normal | inserted_ad | full_video_promo",
+  "exist": true 或 false,
+  "probability": 0-100的整数,
+  "pivot_sentence": "字符串，若无填'无'",
+  "start": "MM:SS，若无填'无'",
+  "end": "MM:SS，若无填'无'",
+  "note": "分析说明"
+}
+绝对禁止输出任何JSON之外的字符。`
+    };
+
+    const injectStyles = () => {
+        if (document.getElementById('bili-ai-skipper-styles')) return;
+        const s = document.createElement('style');
+        s.id = 'bili-ai-skipper-styles';
+        s.textContent = `
+        :root{--primary-color:#00AEEC;--danger-color:#FF6B6B;--success-color:#4CAF50;--warning-color:#FF9800;--text-primary:#333;--text-secondary:#666;--bg-primary:#fff;--bg-secondary:#f5f5f5;--border-color:#ddd;--shadow-lg:0 4px 16px rgba(0,0,0,.15)}
+        .dark-theme{--text-primary:#e0e0e0;--text-secondary:#b0b0b0;--bg-primary:#2a2a2a;--bg-secondary:#1e1e1e;--border-color:#404040;--shadow-lg:0 4px 16px rgba(0,0,0,.4)}
+        .bili-ai-skipper-floating-btn{position:fixed;width:50px;height:50px;border-radius:50%;background:var(--bg-primary);border:2px solid var(--primary-color);box-shadow:var(--shadow-lg);cursor:pointer;z-index:10000;display:flex;align-items:center;justify-content:center;opacity:.7;transition:.3s}
+        .bili-ai-skipper-floating-btn:hover{opacity:1;transform:scale(1.1)}
+        .bili-ai-skipper-floating-btn img{width:24px;height:24px}
+        .bili-ai-skipper-toast{position:fixed;top:20px;right:20px;background:var(--bg-primary);color:var(--text-primary);padding:12px 20px;border-radius:8px;box-shadow:var(--shadow-lg);z-index:10001;font-size:14px;border-left:4px solid var(--primary-color);animation:slideInRight .3s ease}
+        @keyframes slideInRight{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+        .bili-ai-skipper-settings-backdrop{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:10002;display:flex;align-items:center;justify-content:center}
+        .bili-ai-skipper-settings-modal{background:var(--bg-primary);color:var(--text-primary);border-radius:12px;width:90%;max-width:900px;height:800px;display:flex;flex-direction:column;box-shadow:var(--shadow-lg);overflow:hidden}
+        .bili-ai-skipper-settings-header{display:flex;justify-content:space-between;align-items:center;padding:20px;border-bottom:1px solid var(--border-color);background:var(--bg-secondary);flex-shrink:0}
+        .bili-ai-skipper-settings-title{margin:0;font-size:18px;font-weight:600;color:var(--text-primary)}
+        .bili-ai-skipper-settings-close{background:none;border:none;font-size:24px;cursor:pointer;color:var(--text-secondary);padding:0;width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center}
+        .bili-ai-skipper-settings-close:hover{background:var(--danger-color);color:#fff}
+        .bili-ai-skipper-settings-body{padding:0;flex-grow:1;overflow-y:auto}
+        .bili-ai-skipper-settings-tabs{display:flex;background:var(--bg-secondary);border-bottom:1px solid var(--border-color);flex-shrink:0}
+        .bili-ai-skipper-settings-tab{flex:1;padding:15px 20px;border:none;background:none;color:var(--text-secondary);cursor:pointer;font-size:14px;font-weight:500}
+        .bili-ai-skipper-settings-tab.active{color:var(--primary-color);background:var(--bg-primary);border-bottom:2px solid var(--primary-color)}
+        .bili-ai-skipper-tab-content{display:none;padding:20px}
+        .bili-ai-skipper-tab-content.active{display:block}
+        .bili-ai-skipper-settings-section{margin-bottom:25px}
+        .bili-ai-skipper-settings-section h3{margin:0 0 15px;font-size:16px;font-weight:600;border-bottom:1px solid var(--border-color);padding-bottom:8px}
+        .bili-ai-skipper-settings-group{margin-bottom:15px}
+        .bili-ai-skipper-settings-group-inline{display:flex;gap:15px;margin-bottom:15px}
+        .bili-ai-skipper-settings-group-inline>div{flex:1}
+        .bili-ai-skipper-settings-label{display:block;margin-bottom:5px;font-weight:500;font-size:14px}
+        .bili-ai-skipper-settings-input,.bili-ai-skipper-settings-select,.bili-ai-skipper-list-input input[type="text"]{width:100%;padding:10px 12px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:14px;box-sizing:border-box}
+        .bili-ai-skipper-settings-textarea{width:100%;min-height:440px;padding:12px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:14px;font-family:monospace;resize:vertical;box-sizing:border-box}
+        .bili-ai-skipper-settings-checkbox{display:flex;align-items:center;margin-bottom:10px}
+        .bili-ai-skipper-settings-checkbox input[type="checkbox"]{margin-right:8px;transform:scale(1.1)}
+        .bili-ai-skipper-settings-footer{display:flex;justify-content:space-between;align-items:center;padding:20px;border-top:1px solid var(--border-color);background:var(--bg-secondary);flex-shrink:0}
+        .bili-ai-skipper-theme-toggle{display:flex;gap:10px}
+        .bili-ai-skipper-theme-btn{width:40px;height:40px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px}
+        .bili-ai-skipper-settings-actions{display:flex;gap:10px}
+        .bili-ai-skipper-settings-btn-primary,.bili-ai-skipper-settings-btn-secondary,.bili-ai-skipper-list-add-btn{padding:10px 20px;border:none;border-radius:6px;cursor:pointer;font-size:14px;font-weight:500}
+        .bili-ai-skipper-settings-btn-primary{background:var(--primary-color);color:#fff}
+        .bili-ai-skipper-settings-btn-secondary{background:var(--bg-primary);border:1px solid var(--border-color);color:var(--text-primary)}
+        .bili-ai-skipper-list-add-btn{background:var(--primary-color);color:#fff}
+        .bili-ai-skipper-list-container{margin-top:10px}
+        .bili-ai-skipper-list-input{display:flex;margin-bottom:10px}
+        .bili-ai-skipper-list-input input[type="text"]{flex-grow:1;margin-right:10px}
+        .bili-ai-skipper-list-items{max-height:150px;overflow-y:auto;border:1px solid var(--border-color);border-radius:4px;padding:5px;background:var(--bg-primary)}
+        .bili-ai-skipper-list-item{display:flex;justify-content:space-between;align-items:center;padding:8px 5px;border-bottom:1px solid var(--border-color);color:var(--text-primary)}
+        .bili-ai-skipper-list-remove-btn{background:none;border:none;color:var(--danger-color);cursor:pointer;font-size:18px}
+        .bili-ai-skipper-result-popup{position:fixed;bottom:20px;right:20px;width:380px;background:var(--bg-primary);color:var(--text-primary);border-radius:12px;box-shadow:var(--shadow-lg);z-index:10001;border:1px solid var(--border-color)}
+        .bili-ai-skipper-result-popup .header{background:var(--primary-color);color:#fff;padding:10px 15px;display:flex;justify-content:space-between;cursor:move}
+        .bili-ai-skipper-result-popup .close-btn{background:none;border:none;color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center}
+        .bili-ai-skipper-result-popup .content{padding:15px;font-size:13px;line-height:1.6}
+        .bili-ai-skipper-result-popup .footer{padding:10px 15px;border-top:1px solid var(--border-color);background:var(--bg-secondary)}
+        .bili-ai-skipper-result-popup .raw-response{background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:4px;padding:10px;font-family:monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;margin-top:8px;color:var(--text-secondary)}
+        details{margin-top:10px} summary{cursor:pointer;font-weight:bold;font-size:12px}`;
+        document.head.appendChild(s);
+    };
+
+    const showToast = (message, duration = 3000) => {
+        const toast = document.createElement('div');
+        toast.className = 'bili-ai-skipper-toast';
+        if (GM_getValue('ai_settings', DEFAULT_SETTINGS).theme === 'dark') toast.classList.add('dark-theme');
+        toast.textContent = message;
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), duration);
+    };
+
+    const makeDraggable = (el, handle) => {
+        let drag = false, cx, cy, ix, iy, xo = 0, yo = 0;
+        const controller = new AbortController();
+        handle.addEventListener('mousedown', e => { ix = e.clientX - xo; iy = e.clientY - yo; drag = true; }, { signal: controller.signal });
+        document.addEventListener('mouseup', () => { ix = cx; iy = cy; drag = false; }, { signal: controller.signal });
+        document.addEventListener('mousemove', e => {
+            if (!drag) return;
+            e.preventDefault();
+            cx = e.clientX - ix;
+            cy = e.clientY - iy;
+            xo = cx;
+            yo = cy;
+            el.style.transform = `translate(${cx}px,${cy}px)`;
+        }, { signal: controller.signal });
+        return () => controller.abort();
+    };
+
+    const norm = s => String(s || '').replace(/\s+/g, '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+
+    const timeStringToSeconds = t => {
+        if (!t || t === '无') return 0;
+        const p = String(t).split(':').map(Number);
+        return p.length === 2 ? p[0] * 60 + p[1] : p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : (parseInt(t) || 0);
+    };
+
+    const secondsToTimeString = s => {
+        s = Math.floor(s);
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+        const pad = n => String(n).padStart(2, '0');
+        return h > 0 ? `${pad(h)}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+    };
+
+    const AD_URL_RE = /(gaoneng\.bilibili\.com|cm\.bilibili\.com|delivery-attribution|track_id=|creative_id=|adtype=|source_id=|utm_(source|medium|content)=|b23\.tv\/(?:cm-|mall-|vmall-|yaoyue-|[A-Za-z0-9_-]+)|uland\.taobao\.com|taobao\.com|tmall\.com|jd\.com|pinduoduo\.com)/i;
+    const COMMENT_PROMO_TEXT_RE = /(感谢金主|感谢金主爸爸|本期视频由|本期内容由|由.+赞助|赞助播出|特约播出|品牌合作|商务合作|蓝链|点击链接|点击购买|下单|领券|优惠券|首单补贴|立减|现金券)/;
+    const COMMON_HINTS = ['广告','恰饭','推广','植入','商务','跳过','快进','空降','指路','蓝链','福利','优惠','优惠券','立减','补贴','首单','券','感谢金主','金主爸爸','赞助播出'];
+    const EMBEDDED_COMMERCE_URL_RE = /((?:https?:\/\/|\/\/)?(?:b23\.tv\/(?:cm-|mall-|vmall-|yaoyue-)[A-Za-z0-9_-]*|uland\.taobao\.com\/[^\s\u4e00-\u9fa5<>"']*|(?:taobao|tmall|jd|pinduoduo)\.com\/[^\s\u4e00-\u9fa5<>"']*))/ig;
+    const PLATFORM_DANMAKU_ALIASES = {
+    zhuanzhuan: ['转转', '谢甲催', '神秘眼镜女', '回收', '上门回收', '回收补贴'],
+    dewu: ['得物', '首单', '补贴', '现金券', '蓝链'],
+    jd: ['京东', '东哥', '补贴', '自营'],
+    taobao: ['淘宝', '天猫', '链接', '店铺', '下单'],
+    pinduoduo: ['拼多多', '拼夕夕', '百亿补贴', '砍一刀', '多人团'],
+    xianyu: ['闲鱼', '咸鱼', '二手', '挂闲鱼', '鱼塘'],
+    douyin: ['抖音', '抖店', '小黄车', '直播间'],
+    kuaishou: ['快手', '老铁', '快手小店', '直播间'],
+    xiaohongshu: ['小红书', '红薯', '种草', '笔记'],
+    vip: ['唯品会', '大牌特卖', '折扣'],
+    suning: ['苏宁', '苏宁易购', '易购']
+};
+
+    const FEATURE_PATTERNS = [
+        /功率|能耗|省电|续航|性能|参数|配置|材质|做工|外观|尺寸|重量/g,
+        /模式|功能|体验|效果|实测|测试|对比|表现|提升|优化|升级/g,
+        /外机|内机|风感|温度|噪音|压缩机|屏幕|相机|电池|芯片|口感|成分|卖点|习惯|睡眠/g
+    ];
+
+    const CONVERSION_PATTERNS = [
+        /下单|购买|领券|优惠|福利|活动|补贴|首单|专属/g,
+        /点击|蓝链|链接|包修|赠品|抽奖|热销|限时|官方/g
+    ];
+
+    const analyzeCommentAd = info => {
+    const text = norm(info?.text);
+    const urls = [info?.href, info?.goodsUrl, info?.rawUrl].filter(Boolean).join('\n');
+    const anchorText = (info?.anchorTexts || []).join(' ');
+    const textAndMeta = [text, anchorText, info?.meta].filter(Boolean).join('\n');
+
+    const hard = [];
+    const soft = [];
+
+    if (info?.isGoods) hard.push('data-type=goods');
+    if (info?.hasGoodsUrl) hard.push('data-goods-url');
+    if (AD_URL_RE.test(urls)) hard.push('广告归因链接');
+    if (AD_URL_RE.test(textAndMeta)) hard.push('评论内嵌导购链接');
+
+    if ((info?.anchorCount || 0) >= 2) soft.push('多商品/多平台链接');
+    if (/data-type=goods/.test(info?.meta || '')) hard.push('评论商品卡片');
+
+    if (/券\d+元|优惠券|补贴|立减|返现|满减|折扣/.test(text)) soft.push('优惠导购文案');
+    if (/报暗号|加送|赠|赠品|附送|送试用|送清洁液/.test(text)) soft.push('赠品/暗号导购文案');
+    if (COMMENT_PROMO_TEXT_RE.test(text + ' ' + anchorText)) soft.push('赞助/导购提示语');
+    if (/京东|JD|淘宝|天猫|淘|拼多多|拼夕夕|抖音|小黄车|快手|小红书|唯品会/.test(anchorText + ' ' + text)) {
+        soft.push('平台导购');
+    }
+    if (/点击|领取|下单|购买|进店|查看链接/.test(text) && /券|优惠|补贴|赠|送/.test(text)) {
+        soft.push('行动+转化组合');
+    }
+
+    const degradedApiPromo =
+        info?.hasJumpLink &&
+        /券\d+元|优惠券|补贴|赠送|赠品|体验|建议试试|推荐|下单|购买|国货/.test(text);
+
+    if (degradedApiPromo) soft.push('外链+导购口吻');
+
+    const hit = hard.length > 0 || soft.length >= 2 || degradedApiPromo;
+    const score = hit ? Math.min(100, 70 + hard.length * 12 + soft.length * 8) : 0;
+
+    return {
+        hit,
+        certainty: hard.length > 0 ? 'hard' : (hit ? 'medium' : 'low'),
+        score,
+        note: [...hard, ...soft].join('；') || '未命中评论广告规则'
+    };
+};
+
+    const extractEmbeddedCommerceUrls = text => {
+    const raw = String(text || '');
+    const matches = [...raw.matchAll(EMBEDDED_COMMERCE_URL_RE)]
+        .map(m => (m[1] || '').trim())
+        .filter(Boolean)
+        .map(url => url.startsWith('//') ? `https:${url}` : url);
+    return [...new Set(matches)];
+};
+    const detectCommentPlatform = info => {
+    const raw = norm([info?.text, info?.href, info?.goodsUrl, info?.rawUrl].join(' '));
+    const out = [];
+
+    if (/转转|zhuanzhuan|闲置回收|上门回收|回收补贴/.test(raw)) out.push('zhuanzhuan');
+    if (/得物|dewu|首单补贴|现金券/.test(raw)) out.push('dewu');
+    if (/京东|jd\.com|JD|jingdong/.test(raw)) out.push('jd');
+    if (/淘宝|天猫|taobao|tmall|淘/.test(raw)) out.push('taobao');
+    if (/拼多多|pinduoduo|pdd|百亿补贴|多人团|拼夕夕/.test(raw)) out.push('pinduoduo');
+    if (/闲鱼|xianyu|咸鱼|二手/.test(raw)) out.push('xianyu');
+    if (/抖音|douyin|抖店|小黄车/.test(raw)) out.push('douyin');
+    if (/快手|kuaishou|快手小店|老铁/.test(raw)) out.push('kuaishou');
+    if (/小红书|xiaohongshu|redbook|种草|笔记/.test(raw)) out.push('xiaohongshu');
+    if (/唯品会|vip\.com|大牌特卖/.test(raw)) out.push('vip');
+    if (/苏宁|suning|易购/.test(raw)) out.push('suning');
+    return [...new Set(out)];
+};
+
+    const extractCommentKeywords = info => {
+    const raw = [info?.text, info?.href, info?.goodsUrl, info?.rawUrl].join(' ');
+    const platforms = detectCommentPlatform(info);
+    const out = [];
+
+    const pushWord = (word, weight, type) => {
+        if (!word) return;
+        if (!out.some(x => x.word === word)) out.push({ word, weight, type });
+    };
+
+    getRepeatedPhrases([raw], 2, 8).slice(0, 8).forEach(w => pushWord(w, 3, 'phrase'));
+
+    platforms.forEach(p => {
+        (PLATFORM_DANMAKU_ALIASES[p] || []).forEach(w => pushWord(w, 4, 'alias'));
+    });
+
+    ['蓝链','福利','立减','补贴','现金券','优惠券','首单','活动','抽奖','免单','热销','包修','下单','点击即可','回收','上门回收']
+        .filter(x => raw.includes(x))
+        .forEach(w => pushWord(w, 2, 'cta'));
+
+    COMMON_HINTS.forEach(w => pushWord(w, 1, 'generic'));
+
+    return out.slice(0, 24);
+};
+
+    const splitCaptionSections = text => {
+        const lines = String(text || '').split('\n').filter(Boolean);
+        const n = lines.length;
+        if (!n) return { head: '', mid: '', tail: '' };
+        return {
+            head: lines.slice(0, Math.ceil(n * 0.3)).join(' '),
+            mid: lines.slice(Math.ceil(n * 0.3), Math.ceil(n * 0.7)).join(' '),
+            tail: lines.slice(Math.ceil(n * 0.7)).join(' ')
+        };
+    };
+
+    const getRepeatedPhrases = (texts, minLen = 2, maxLen = 8) => {
+        const map = new Map();
+        texts.forEach(t => {
+            const s = norm(t);
+            for (let len = minLen; len <= maxLen; len++) {
+                for (let i = 0; i <= s.length - len; i++) {
+                    const sub = s.slice(i, i + len);
+                    if (/^[，。！？、；：“”‘’（）【】\d]+$/.test(sub)) continue;
+                    map.set(sub, (map.get(sub) || 0) + 1);
+                }
+            }
+        });
+        return [...map.entries()]
+            .filter(([k, v]) => v >= 2 && k.length >= 2)
+            .sort((a, b) => b[1] - a[1])
+            .map(([k]) => k)
+            .filter(k => !/的是了可以一个这个那个我们你们他们真的非常而且然后但是如果所以因为已经还是就是一下/.test(k))
+            .slice(0, 15);
+    };
+
+    const countPatternHits = (text, patterns) => patterns.reduce((n, re) => n + ((norm(text).match(re) || []).length), 0);
+
+    const detectFullVideoPromo = (videoInfo, topCommentInfo, captionsText) => {
+        const title = norm(videoInfo?.title);
+        const comment = norm(topCommentInfo?.text);
+        const caps = String(captionsText || '');
+        const { head, mid } = splitCaptionSections(caps);
+
+        const phrases = getRepeatedPhrases([title, comment, head, mid], 2, 8);
+        const objectHits = phrases.filter(p => title.includes(p) && (comment.includes(p) || head.includes(p) || mid.includes(p)));
+        const featureHead = countPatternHits(head, FEATURE_PATTERNS);
+        const featureMid = countPatternHits(mid, FEATURE_PATTERNS);
+        const conversion = countPatternHits(comment + ' ' + head, CONVERSION_PATTERNS);
+
+        let score = 0;
+        if (objectHits.length >= 1) score += 35;
+        if (objectHits.length >= 2) score += 15;
+        if (featureHead >= 3) score += 20;
+        if (featureMid >= 2) score += 15;
+        if (conversion >= 2) score += 15;
+
+        return {
+            hit: score >= 70,
+            score,
+            objectHints: objectHits.slice(0, 5),
+            note: `主对象命中${objectHits.length}项；前段卖点${featureHead}；中段卖点${featureMid}；转化导向${conversion}`
+        };
+    };
+
+    const getVideoInfo = bvid => new Promise((resolve, reject) => {
+    GM_xmlhttpRequest({
+        method: 'GET',
+        url: `https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`,
+        timeout: 10000,
+        onload: res => {
+            try {
+                const data = JSON.parse(res.responseText);
+                if (data.code === 0) {
+                    resolve({
+                        cid: data.data.cid,
+                        aid: data.data.aid,
+                        title: data.data.title,
+                        desc: data.data.desc,
+                        duration: data.data.duration || 0
+                    });
+                } else {
+                    reject(new Error('获取视频信息失败'));
+                }
+            } catch (e) {
+                reject(e);
+            }
+        },
+        onerror: () => reject(new Error('鑾峰彇瑙嗛淇℃伅璇锋眰澶辫触')),
+        ontimeout: () => reject(new Error('鑾峰彇瑙嗛淇℃伅瓒呮椂'))
+    });
+});
+    const waitForTopCommentDOM = (timeout = 5000, interval = 300) => new Promise(resolve => {
+    const start = Date.now();
+    const timer = setInterval(() => {
+        const domHit = extractTopCommentFromDOM();
+        if (domHit) {
+            clearInterval(timer);
+            resolve(domHit);
+            return;
+        }
+        if (Date.now() - start >= timeout) {
+            clearInterval(timer);
+            resolve(null);
+        }
+    }, interval);
+});
+
+    const COMMENT_ROOT_SELECTOR = 'p#contents, .reply-content, .reply-content-container, .sub-reply-content, .reply-item-content';
+
+    const scoreCommentRoot = root => {
+    if (!root) return -1;
+    let score = 0;
+    if (root.closest('.reply-top, .top-reply, .pin, .pinned-comment-item')) score += 40;
+    if (root.querySelector('a[data-type="goods"]')) score += 80;
+    if (root.querySelector('a[data-goods-url], a[data-raw-url]')) score += 50;
+    if (root.querySelector('a[href*="taobao.com"], a[href*="tmall.com"], a[href*="jd.com"], a[href*="pinduoduo.com"], a[href*="uland.taobao.com"]')) score += 30;
+    if (COMMENT_PROMO_TEXT_RE.test(norm(root.textContent || ''))) score += 20;
+    return score;
+};
+
+    const findBestTopCommentRoot = () => {
+    const directCandidates = [...document.querySelectorAll(COMMENT_ROOT_SELECTOR)];
+    const anchorCandidates = [...document.querySelectorAll('a[data-type="goods"], a[data-goods-url], a[data-raw-url], a[href*="uland.taobao.com"], a[href*="b23.tv/mall-"], a[href*="taobao.com"], a[href*="tmall.com"], a[href*="jd.com"], a[href*="pinduoduo.com"]')]
+        .map(a => a.closest(COMMENT_ROOT_SELECTOR))
+        .filter(Boolean);
+    const candidates = [...new Set([...anchorCandidates, ...directCandidates])];
+    if (!candidates.length) return null;
+    return candidates
+        .map(root => ({ root, score: scoreCommentRoot(root) }))
+        .sort((a, b) => b.score - a.score)[0]?.root || null;
+};
+
+    const extractTopCommentFromDOM = () => {
+    try {
+        const root = findBestTopCommentRoot();
+        if (!root) return null;
+
+        const anchors = [...root.querySelectorAll('a')];
+        const hrefs = anchors.map(a => a.getAttribute('href') || '').filter(Boolean);
+        const rawUrls = anchors.map(a => a.getAttribute('data-raw-url') || '').filter(Boolean);
+        const goodsUrls = anchors.map(a => a.getAttribute('data-goods-url') || '').filter(Boolean);
+        const anchorTexts = anchors.map(a => norm(a.textContent || '')).filter(Boolean);
+        const meta = anchors.map(a => {
+            const href = a.getAttribute('href') || '';
+            const raw = a.getAttribute('data-raw-url') || '';
+            const goods = a.getAttribute('data-goods-url') || '';
+            const type = a.getAttribute('data-type') || '';
+            return [href, raw, goods, type ? `data-type=${type}` : ''].filter(Boolean).join(' ');
+        }).join('\n');
+
+        const info = {
+            source: 'dom',
+            status: '【置顶评论DOM】',
+            text: norm(root.textContent || ''),
+            href: hrefs.join('\n'),
+            goodsUrl: goodsUrls.join('\n'),
+            rawUrl: rawUrls.join('\n'),
+            anchorTexts,
+            anchorCount: anchors.length,
+            isGoods: anchors.some(a => a.getAttribute('data-type') === 'goods'),
+            hasGoodsUrl: goodsUrls.length > 0,
+            hasJumpLink: hrefs.length > 0 || rawUrls.length > 0 || goodsUrls.length > 0,
+            meta
+        };
+
+        return { ...info, adAnalysis: analyzeCommentAd(info) };
+    } catch {
+        return null;
+    }
+};
+
+    const hasStrongCommerceSignal = info => {
+    if (!info) return false;
+    const blob = [info.href, info.goodsUrl, info.rawUrl, info.meta].filter(Boolean).join('\n');
+    return !!(info.isGoods || info.hasGoodsUrl || /data-type=goods/.test(info.meta || '') || AD_URL_RE.test(blob));
+};
+
+    const pickBetterCommentInfo = (domInfo, apiInfo) => {
+    if (!domInfo) return apiInfo;
+    if (!apiInfo) return domInfo;
+    const domStrong = hasStrongCommerceSignal(domInfo);
+    const apiStrong = hasStrongCommerceSignal(apiInfo);
+    if (domStrong && !apiStrong) return domInfo;
+    if (domInfo.adAnalysis?.certainty === 'hard' && apiInfo.adAnalysis?.certainty !== 'hard') return domInfo;
+    const domScore = (domInfo.adAnalysis?.score || 0) + (domInfo.isGoods ? 40 : 0) + (domInfo.hasGoodsUrl ? 30 : 0);
+    const apiScore = (apiInfo.adAnalysis?.score || 0) + (apiInfo.isGoods ? 40 : 0) + (apiInfo.hasGoodsUrl ? 30 : 0);
+    return domScore >= apiScore ? domInfo : apiInfo;
+};
+
+   const getTopComment = aid => new Promise(async resolve => {
+    const domHitPromise = waitForTopCommentDOM(5000, 300);
+
+    GM_xmlhttpRequest({
+        method: 'GET',
+        url: `https://api.bilibili.com/x/v2/reply/main?oid=${aid}&type=1&mode=3`,
+        onload: async res => {
+            try {
+                const data = JSON.parse(res.responseText);
+                const raw = data?.data?.top_replies?.[0] || data?.data?.upper?.top || data?.data?.replies?.[0];
+                if (!raw) {
+                    const domHit = await domHitPromise;
+                    return resolve(pickBetterCommentInfo(domHit, {
+                        source: 'api',
+                        status: '无置顶或评论',
+                        text: '',
+                        href: '',
+                        goodsUrl: '',
+                        rawUrl: '',
+                        isGoods: false,
+                        hasGoodsUrl: false,
+                        hasJumpLink: false,
+                        adAnalysis: { hit: false, certainty: 'low', score: 0, note: '无评论' }
+                    }));
+                }
+                const apiText = raw?.content?.message || '';
+                const embeddedUrls = extractEmbeddedCommerceUrls(apiText);
+                const info = {
+                    source: 'api',
+                    status: raw === data?.data?.replies?.[0] ? '【首条热评】' : '【置顶评论】',
+                    text: norm(apiText),
+                    href: raw?.content?.jump_url || raw?.content?.url || embeddedUrls.join('\n'),
+                    goodsUrl: '',
+                    rawUrl: embeddedUrls.join('\n'),
+                    isGoods: false,
+                    hasGoodsUrl: false,
+                    hasJumpLink: !!(raw?.content?.jump_url || raw?.content?.url || embeddedUrls.length),
+                    anchorTexts: [],
+                    anchorCount: embeddedUrls.length,
+                    meta: embeddedUrls.join('\n')
+                };
+                const domHit = await domHitPromise;
+                resolve(pickBetterCommentInfo(domHit, { ...info, adAnalysis: analyzeCommentAd(info) }));
+            } catch {
+                const domHit = await domHitPromise;
+                resolve(pickBetterCommentInfo(domHit, {
+                    source: 'api',
+                    status: '获取评论解析失败',
+                    text: '',
+                    href: '',
+                    goodsUrl: '',
+                    rawUrl: '',
+                    isGoods: false,
+                    hasGoodsUrl: false,
+                    hasJumpLink: false,
+                    adAnalysis: { hit: false, certainty: 'low', score: 0, note: '获取评论解析失败' }
+                }));
+            }
+        },
+        onerror: async () => {
+            const domHit = await domHitPromise;
+            resolve(pickBetterCommentInfo(domHit, {
+                source: 'api',
+                status: '获取评论请求失败',
+                text: '',
+                href: '',
+                goodsUrl: '',
+                rawUrl: '',
+                isGoods: false,
+                hasGoodsUrl: false,
+                hasJumpLink: false,
+                adAnalysis: { hit: false, certainty: 'low', score: 0, note: '获取评论请求失败' }
+            }));
+        }
+    });
+});
+
+    const getDanmakuXml = cid => new Promise(resolve => {
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `https://api.bilibili.com/x/v1/dm/list.so?oid=${cid}`,
+            onload: res => resolve(res.responseText),
+            onerror: () => resolve("")
+        });
+    });
+
+    const parseDanmakuToArray = (xml, opts = {}) => {
+    if (!xml) return [];
+    const { ignoreWhitelist = false } = opts;
+    const settings = GM_getValue('ai_settings', DEFAULT_SETTINGS);
+    const doc = new DOMParser().parseFromString(xml, 'text/xml');
+
+    let arr = [...doc.querySelectorAll('d')].map(d => ({
+        time: parseFloat(d.getAttribute('p').split(',')[0]),
+        text: (d.textContent || '').trim()
+    })).filter(x => x.text);
+
+    if (settings.enableBlacklist && settings.blacklist.length) {
+        arr = arr.filter(d => !settings.blacklist.some(k => d.text.toLowerCase().includes(k.toLowerCase())));
+    }
+
+    if (!ignoreWhitelist && settings.enableWhitelist && settings.whitelist.length) {
+        arr = arr.filter(d => settings.whitelist.some(k => d.text.toLowerCase().includes(k.toLowerCase())));
+    }
+
+    return arr.sort((a, b) => a.time - b.time);
+};
+
+    const parseAndFilterDanmaku = xml => {
+        const settings = GM_getValue('ai_settings', DEFAULT_SETTINGS);
+        let arr = parseDanmakuToArray(xml);
+        if (arr.length < settings.minDanmakuForFullAnalysis) {
+            const simple = ['广告', '推广', '商品', '购买', '链接', '优惠'];
+            if (!arr.some(d => simple.some(k => d.text.includes(k)))) return "弹幕稀少或无广告特征词";
+        }
+        if (arr.length > settings.maxDanmakuCount) {
+            for (let i = arr.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [arr[i], arr[j]] = [arr[j], arr[i]];
+            }
+            arr = arr.slice(0, settings.maxDanmakuCount);
+        }
+        return arr.map(d => `[${secondsToTimeString(d.time)}] ${d.text}`).join('\n');
+    };
+
+    const findAdSegmentFromDanmaku = (arr, commentInfo) => {
+    if (!arr.length) return { hit: false, score: 0, start: '无', end: '无', note: '弹幕为空' };
+
+    const keys = extractCommentKeywords(commentInfo); // [{word, weight, type}, ...]
+    const hits = arr.map(d => {
+        const text = norm(d.text);
+        const matched = keys.filter(k => text.includes(k.word));
+        const weightSum = matched.reduce((s, x) => s + x.weight, 0);
+        const strongCount = matched.filter(x => x.weight >= 3).length; // alias / phrase
+        return { ...d, matched, weightSum, strongCount };
+    }).filter(d => d.matched.length);
+
+    if (hits.length < 3) {
+        return { hit: false, score: 0, start: '无', end: '无', note: `命中相关弹幕过少(${hits.length}条)` };
+    }
+
+    let best = null;
+    const W = 18;
+
+    for (let i = 0; i < hits.length; i++) {
+        const s = hits[i].time, e = s + W;
+        const cluster = hits.filter(x => x.time >= s && x.time <= e);
+
+        const totalWeight = cluster.reduce((sum, x) => sum + x.weightSum, 0);
+        const strongDanmaku = cluster.filter(x => x.strongCount > 0).length;
+        const uniqueWords = new Set(cluster.flatMap(x => x.matched.map(m => m.word))).size;
+        const uniqueStrongWords = new Set(
+            cluster.flatMap(x => x.matched.filter(m => m.weight >= 3).map(m => m.word))
+        ).size;
+
+        const score = totalWeight + strongDanmaku * 8 + uniqueWords * 2 + uniqueStrongWords * 6;
+
+        if (!best || score > best.score) {
+            best = { s, e, cluster, totalWeight, strongDanmaku, uniqueWords, uniqueStrongWords, score };
+        }
+    }
+
+    if (!best) {
+        return { hit: false, score: 0, start: '无', end: '无', note: '未形成有效弹幕聚集区' };
+    }
+
+    // 必须至少出现一个强词，否则泛词不可信
+    if (best.strongDanmaku < 1 && best.uniqueStrongWords < 1) {
+        return { hit: false, score: 0, start: '无', end: '无', note: '仅命中泛广告词，缺少平台/别名强锚点' };
+    }
+
+    let start = Math.max(0, best.cluster[0].time - 8);
+    let end = best.cluster[best.cluster.length - 1].time + 20;
+    if (end - start > 90) end = start + 90;
+
+    return {
+        hit: true,
+        score: Math.min(95, 45 + Math.floor(best.score / 3)),
+        start: secondsToTimeString(start),
+        end: secondsToTimeString(end),
+        note: `弹幕反查成功；强锚点弹幕${best.strongDanmaku}条，强关键词${best.uniqueStrongWords}类，总权重${best.totalWeight}`
+    };
+};
+
+    const getCaptions = async (bvid, cid) => {
+        try {
+            const qs = await WbiUtils.encWbi({ bvid, cid });
+            const qsStr = new URLSearchParams(qs).toString();
+            const playerRes = await fetch(`https://api.bilibili.com/x/player/wbi/v2?${qsStr}`, { credentials: 'include' });
+            const playerData = await playerRes.json();
+            const subtitles = playerData.data?.subtitle?.subtitles || [];
+            if (!subtitles.length) return "该视频未提供官方CC字幕。";
+
+            const scoreSubtitle = sub => {
+                const lang = `${sub?.lan || ''} ${sub?.lan_doc || ''}`.toLowerCase();
+                let score = 0;
+                if (/zh|cn|中文|汉语|国语/.test(lang)) score += 30;
+                if (/人工|official|官方/.test(lang)) score += 10;
+                if (/auto|自动|machine|机翻/.test(lang)) score -= 10;
+                return score;
+            };
+
+            const candidates = [...subtitles].sort((a, b) => scoreSubtitle(b) - scoreSubtitle(a));
+            for (const subtitle of candidates) {
+                if (!subtitle?.subtitle_url) continue;
+                const subUrl = /^https?:\/\//.test(subtitle.subtitle_url) ? subtitle.subtitle_url : `https:${subtitle.subtitle_url}`;
+                try {
+                    const subRes = await fetch(subUrl);
+                    const subData = await subRes.json();
+                    if (subData.body && subData.body.length) {
+                        return subData.body.map(item => `[${secondsToTimeString(item.from)}] ${item.content}`).join('\n');
+                    }
+                } catch {}
+            }
+
+            return "字幕文件为空。";
+        } catch {
+            return "获取字幕过程中发生异常。";
+        }
+    };
+
+    const formatTranscriptSegments = segments => {
+        if (!Array.isArray(segments) || !segments.length) return '';
+        return segments
+            .map(seg => {
+                const start = secondsToTimeString(Number(seg?.start) || 0);
+                const text = String(seg?.text || '').trim();
+                return text ? `[${start}] ${text}` : '';
+            })
+            .filter(Boolean)
+            .join('\n');
+    };
+
+    const shouldUseLocalAsr = (videoInfo, captionsText, settings) => {
+        if (!settings.enableLocalAsr) return false;
+        const noCaption = !captionsText || /未提供官方CC字幕|字幕文件为空|获取字幕过程中发生异常/.test(captionsText);
+        if (!noCaption) return false;
+        const durationSeconds = Number(videoInfo?.duration) || 0;
+        if (durationSeconds <= 0) return true;
+        return durationSeconds <= (Number(settings.localAsrMaxVideoMinutes) || 20) * 60;
+    };
+
+    const callLocalAsr = (videoInfo, bvid, cid) => new Promise((resolve, reject) => {
+        const settings = GM_getValue('ai_settings', DEFAULT_SETTINGS);
+        if (!settings.enableLocalAsr || !settings.localAsrUrl) {
+            reject(new Error('未启用本地ASR'));
+            return;
+        }
+
+        const payload = {
+            bvid,
+            cid,
+            aid: videoInfo?.aid,
+            title: videoInfo?.title || '',
+            duration: videoInfo?.duration || 0,
+            pageUrl: location.href
+        };
+
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: settings.localAsrUrl,
+            headers: { 'Content-Type': 'application/json' },
+            data: JSON.stringify(payload),
+            timeout: Math.max(10000, Number(settings.localAsrTimeoutMs) || 180000),
+            onload: response => {
+                try {
+                    const data = JSON.parse(response.responseText);
+                    if (response.status < 200 || response.status >= 300) {
+                        throw new Error(data?.message || `HTTP ${response.status}`);
+                    }
+                    const text = String(data?.text || '').trim();
+                    const segments = Array.isArray(data?.segments) ? data.segments : [];
+                    const formattedText = formatTranscriptSegments(segments) || text;
+                    if (!formattedText) throw new Error('本地ASR未返回可用文本');
+                    resolve({
+                        provider: data?.provider || settings.localAsrProviderLabel || 'local-asr',
+                        language: data?.language || 'unknown',
+                        text,
+                        segments,
+                        formattedText
+                    });
+                } catch (error) {
+                    reject(error);
+                }
+            },
+            ontimeout: () => reject(new Error('本地ASR请求超时')),
+            onerror: () => reject(new Error('本地ASR请求失败'))
+        });
+    });
+
+    const callAI = async (videoMeta, danmakuText, topCommentInfo, captionsText, fullPromoHint) => {
+        const settings = GM_getValue('ai_settings', DEFAULT_SETTINGS);
+        if (!settings.apiKey) throw new Error('请配置API密钥');
+
+        let baseUrl = API_PROVIDERS[settings.apiProvider]?.defaultUrl || '';
+        if (settings.apiProvider === 'custom' && settings.baseUrl) baseUrl = settings.baseUrl;
+
+        const safeDesc = (videoMeta.desc || '').substring(0, 300);
+        const commentBlock = `
+状态: ${topCommentInfo?.status || '无'}
+来源: ${topCommentInfo?.source || 'unknown'}
+文本: ${topCommentInfo?.text || '无'}
+href: ${topCommentInfo?.href || '无'}
+data-goods-url: ${topCommentInfo?.goodsUrl || '无'}
+data-raw-url: ${topCommentInfo?.rawUrl || '无'}
+data-type-goods: ${topCommentInfo?.isGoods ? 'true' : 'false'}
+规则命中: ${topCommentInfo?.adAnalysis?.hit ? 'true' : 'false'}
+规则说明: ${topCommentInfo?.adAnalysis?.note || '无'}`.trim();
+
+        const fullPromoBlock = `
+hit: ${fullPromoHint?.hit ? 'true' : 'false'}
+score: ${fullPromoHint?.score || 0}
+objectHints: ${(fullPromoHint?.objectHints || []).join(', ') || '无'}
+note: ${fullPromoHint?.note || '无'}`.trim();
+
+        const userMessage = `【视频元数据】:
+标题: ${videoMeta.title}
+简介: ${safeDesc}
+
+【评论区情况】:
+${commentBlock}
+
+【全片推广规则预判】:
+${fullPromoBlock}
+
+【弹幕提取】:
+${danmakuText || '无'}
+
+【视频字幕文本】:
+${captionsText || '无字幕'}
+
+【重要规则】:
+1. 若评论区已命中强推广规则，则默认存在商业推广线索。
+2. 若全片推广规则预判为真，请优先考虑输出 type="full_video_promo"。
+3. 只有中途插入广告时才输出 type="inserted_ad" 并给出 start/end。
+4. 无字幕时不要编造时间。`;
+
+        const makeRequest = model => {
+            let headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${settings.apiKey}` };
+            let url = `${baseUrl}/chat/completions`;
+            let body = {
+                model,
+                messages: [{ role: 'system', content: settings.agentPrompt }, { role: 'user', content: userMessage }],
+                temperature: 0.1
+            };
+
+            if (settings.apiProvider === 'gemini') {
+                url = `${baseUrl}/models/${model}:generateContent?key=${settings.apiKey}`;
+                headers = { 'Content-Type': 'application/json' };
+                body = { contents: [{ parts: [{ text: `${settings.agentPrompt}\n\n${userMessage}` }] }] };
+            } else if (settings.apiProvider === 'anthropic') {
+                url = `${baseUrl}/messages`;
+                headers = { 'Content-Type': 'application/json', 'x-api-key': settings.apiKey, 'anthropic-version': '2023-06-01' };
+                body = { model, max_tokens: 1024, messages: [{ role: 'user', content: `${settings.agentPrompt}\n\n${userMessage}` }] };
+            }
+
+            return new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url,
+                    headers,
+                    data: JSON.stringify(body),
+                    onload: response => {
+                        try {
+                            const data = JSON.parse(response.responseText);
+                            if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+                            let content = settings.apiProvider === 'gemini'
+                                ? data.candidates?.[0]?.content?.parts?.[0]?.text
+                                : settings.apiProvider === 'anthropic'
+                                    ? data.content?.[0]?.text
+                                    : data.choices?.[0]?.message?.content;
+                            if (!content) throw new Error('大模型未返回预期数据结构: ' + response.responseText);
+                            content = content.trim().replace(/^```json\s*\n?/, '').replace(/\n?```$/, '').replace(/^`/, '').replace(/`$/, '');
+                            resolve(JSON.parse(content));
+                        } catch (e) {
+                            reject(e);
+                        }
+                    },
+                    onerror: () => reject(new Error('API 网络请求失败'))
+                });
+            });
+        };
+
+        try {
+            return await makeRequest(settings.model);
+        } catch (primaryError) {
+            if (!settings.fallbackModel || !settings.fallbackModel.trim()) throw new Error(`API拒绝访问: ${primaryError.message}`);
+            console.warn(`主模型 [${settings.model}] 失败：${primaryError.message}，切换备选模型 [${settings.fallbackModel}]`);
+            showToast('主模型拥挤或出错，正在自动调用备选模型...', 3000);
+            try {
+                return await makeRequest(settings.fallbackModel.trim());
+            } catch (fallbackError) {
+                throw new Error(`主备模型均失效。主模型报错: ${primaryError.message} | 备选模型报错: ${fallbackError.message}`);
+            }
+        }
+    };
+
+    const normalizeAiResult = aiResult => {
+        const type = ['normal', 'inserted_ad', 'full_video_promo'].includes(aiResult?.type) ? aiResult.type : (
+            (aiResult?.exist === true || String(aiResult?.exist).toLowerCase() === 'true') ? 'inserted_ad' : 'normal'
+        );
+        return {
+            type,
+            exist: aiResult?.exist === true || String(aiResult?.exist).toLowerCase() === 'true',
+            probability: parseInt(aiResult?.probability) || 0,
+            pivot_sentence: aiResult?.pivot_sentence || '无',
+            start: aiResult?.start || '无',
+            end: aiResult?.end || '无',
+            note: aiResult?.note || '无'
+        };
+    };
+
+    const hasValidSegment = r => {
+    if (!r) return false;
+    const startOk = r.start && r.start !== '无';
+    const endOk = r.end && r.end !== '无';
+    if (!startOk || !endOk) return false;
+    const s = timeStringToSeconds(r.start);
+    const e = timeStringToSeconds(r.end);
+    return e > s;
+};
+
+const shouldPreferInsertedAd = (r, videoDuration = 0) => {
+    if (!hasValidSegment(r)) return false;
+
+    const s = timeStringToSeconds(r.start);
+    const e = timeStringToSeconds(r.end);
+    const dur = e - s;
+
+    // 太短/太长都不可信
+    if (dur < 8) return false;
+    if (dur > 180) return false;
+
+    // 有转折句，强烈说明是局部插入
+    if (r.pivot_sentence && r.pivot_sentence !== '无') return true;
+
+    // 如果能拿到视频总时长，再排除“几乎全片都是广告”的情况
+    if (videoDuration > 0) {
+        const ratio = dur / videoDuration;
+        if (ratio < 0.65 && s > 8) return true;
+    }
+
+    return false;
+};
+
+    const calculateFinalProbability = (aiResult, settings) => {
+        let result = normalizeAiResult(aiResult);
+        let prob = result.probability;
+        const hasValidTime = result.start && result.end && result.start !== '无' && result.end !== '无';
+
+        if (result.type === 'inserted_ad' && !result.exist && prob >= 50 && hasValidTime) result.exist = true;
+        if ((result.type === 'inserted_ad' || result.type === 'full_video_promo') && prob === 0) prob = 80;
+
+        let finalProbability = prob;
+        let note = '';
+
+        if (result.type === 'inserted_ad' && result.exist && hasValidTime) {
+            const start = timeStringToSeconds(result.start);
+            const end = timeStringToSeconds(result.end);
+            const dur = end - start;
+            if (dur < settings.minAdDuration) {
+                const p = Math.min(30, (settings.minAdDuration - dur) * 2);
+                finalProbability = Math.max(0, finalProbability - p);
+                note += `广告时长过短(-${p}%); `;
+            }
+            if (dur > settings.maxAdDuration) {
+                const p = Math.min(40, (dur - settings.maxAdDuration) * settings.durationPenalty);
+                finalProbability = Math.max(0, finalProbability - p);
+                note += `广告时长过长(-${p}%); `;
+            }
+        } else if (result.type === 'full_video_promo' && result.exist) {
+            note += '检测为整期推广内容，不执行局部时长惩罚; ';
+        } else if (result.exist) {
+            note += '缺少可用字幕或精确时段，未做时长惩罚; ';
+        }
+
+        return { ...result, finalProbability: Math.round(finalProbability), adjustmentNote: note || '无参数调整' };
+    };
+
+    const showResultPopup = (result, sentData) => {
+        const settings = GM_getValue('ai_settings', DEFAULT_SETTINGS);
+        const popup = document.createElement('div');
+        popup.className = 'bili-ai-skipper-result-popup';
+        if (settings.theme === 'dark') popup.classList.add('dark-theme');
+        const esc = str => { const div = document.createElement('div'); div.textContent = String(str || ''); return div.innerHTML; };
+
+        let typeLabel = '无广告';
+        let typeColor = 'var(--success-color)';
+        if (result.type === 'inserted_ad') {
+            typeLabel = '检测到植入广告';
+            typeColor = 'var(--danger-color)';
+        } else if (result.type === 'full_video_promo') {
+            typeLabel = '检测到整期推广视频';
+            typeColor = 'var(--warning-color)';
+        }
+
+        popup.innerHTML = `
+        <div class="header"><span class="title">双轨 AI 分析完成</span><button class="close-btn">×</button></div>
+        <div class="content">
+            <p><strong>内容类型:</strong> <span style="color:${typeColor}">${typeLabel}</span></p>
+            <p><strong>最终确信概率:</strong> ${result.finalProbability}%</p>
+            ${(result.pivot_sentence && result.pivot_sentence !== '无') ? `<p style="color:var(--warning-color);"><strong>前摇转折句:</strong> ${esc(result.pivot_sentence)}</p>` : ''}
+            ${(result.type === 'inserted_ad' && result.start && result.end && result.start !== '无' && result.end !== '无') ? `<p><strong>广告时段:</strong> ${esc(result.start)} - ${esc(result.end)}</p>` : ''}
+            <p><strong>判断理由:</strong> ${esc(result.note) || '无'}</p>
+            <p style="color:var(--text-secondary);font-size:11px;">${esc(result.adjustmentNote)}</p>
+            <details><summary>查看发送给AI的线索(元数据/字幕/评论/弹幕)</summary><div class="raw-response">${esc(sentData)}</div></details>
+        </div>
+        <div class="footer"><label><input type="checkbox" id="auto-skip-toggle" ${settings.defaultSkip ? 'checked' : ''}> 自动跳过</label></div>`;
+        document.body.appendChild(popup);
+        const cleanupDrag = makeDraggable(popup, popup.querySelector('.header'));
+        popup.__dragCleanup = cleanupDrag;
+        popup.querySelector('.close-btn').addEventListener('click', () => {
+            cleanupDrag();
+            delete popup.__dragCleanup;
+            popup.remove();
+        });
+        popup.querySelector('#auto-skip-toggle').addEventListener('change', e => {
+            const cur = GM_getValue('ai_settings', DEFAULT_SETTINGS);
+            GM_setValue('ai_settings', { ...cur, defaultSkip: e.target.checked });
+            if (!e.target.checked) clearSkipTimer();
+            showToast(`自动跳过已${e.target.checked ? '开启' : '关闭'}`, 2000);
+        });
+    };
+
+    let currentBvid = null;
+    let skipTimer = null;
+    let urlCheckInterval = null;
+    const clearSkipTimer = () => {
+        if (skipTimer) {
+            clearInterval(skipTimer);
+            skipTimer = null;
+        }
+    };
+
+    const main = async () => {
+        try {
+            const bvidMatch = window.location.pathname.match(/video\/(BV[1-9A-HJ-NP-Za-km-z]+)/);
+            if (!bvidMatch) return;
+            const bvid = bvidMatch[1];
+            currentBvid = bvid;
+
+            const cacheKey = `bili_ai_skipper_cache_v9_${bvid}`;
+            const cached = GM_getValue(cacheKey, null);
+            let aiResult;
+            let displaySentData = "【命中本地记忆，秒速加载，未消耗Token】";
+
+            if (cached) {
+                showToast('命中缓存，瞬间加载广告分析结果！', 2000);
+                aiResult = cached;
+            } else {
+                showToast('正在抓取视频多维数据，准备进行AI分析...', 3000);
+
+                const videoInfo = await getVideoInfo(bvid);
+                const [topCommentInfo, danmakuXml, captionsText] = await Promise.all([
+                    getTopComment(videoInfo.aid),
+                    getDanmakuXml(videoInfo.cid),
+                    getCaptions(bvid, videoInfo.cid)
+                ]);
+
+                const settings = GM_getValue('ai_settings', DEFAULT_SETTINGS);
+                const danmakuText = parseAndFilterDanmaku(danmakuXml);
+                const commentHit = !!topCommentInfo?.adAnalysis?.hit;
+                let workingCaptionsText = captionsText;
+                let transcriptSource = 'official-caption';
+                let asrResult = null;
+
+                if (shouldUseLocalAsr(videoInfo, captionsText, settings)) {
+                    try {
+                        showToast('无官方字幕，正在调用本地 ASR 识别音频...', 3000);
+                        asrResult = await callLocalAsr(videoInfo, bvid, videoInfo.cid);
+                        workingCaptionsText = asrResult.formattedText;
+                        transcriptSource = `local-asr:${asrResult.provider}`;
+                    } catch (asrError) {
+                        console.warn('本地ASR失败:', asrError);
+                        transcriptSource = 'local-asr-failed';
+                    }
+                }
+
+                const noCaption = !workingCaptionsText || /未提供官方CC字幕|字幕文件为空|获取字幕过程中发生异常/.test(workingCaptionsText);
+                const fullPromoHint = detectFullVideoPromo(videoInfo, topCommentInfo, workingCaptionsText);
+
+                displaySentData = `【视频元数据】:
+标题: ${videoInfo.title}
+简介: ${(videoInfo.desc || '').substring(0, 200)}...
+
+【置顶评论】:
+${topCommentInfo?.status || '无'}
+${topCommentInfo?.text || '无'}
+规则命中: ${commentHit ? 'true' : 'false'}
+规则说明: ${topCommentInfo?.adAnalysis?.note || '无'}
+
+【全片推广预判】:
+hit: ${fullPromoHint.hit}
+score: ${fullPromoHint.score}
+objectHints: ${(fullPromoHint.objectHints || []).join(', ') || '无'}
+note: ${fullPromoHint.note}
+
+【文本来源】:
+source: ${transcriptSource}
+${asrResult ? `language: ${asrResult.language || 'unknown'}` : ''}
+
+【字幕节选片段】:
+${String(workingCaptionsText || '').substring(0, 1000)}...
+
+【弹幕节选】:
+${String(danmakuText || '').substring(0, 300)}...`;
+
+                if (commentHit && noCaption) {
+    aiResult = {
+        type: 'inserted_ad',
+        exist: true,
+        probability: Math.max(88, topCommentInfo.adAnalysis.score || 88),
+        pivot_sentence: '无',
+        start: '无',
+        end: '无',
+        note: `评论区已命中强广告规则：${topCommentInfo.adAnalysis.note}；但当前无可用字幕，已停止使用弹幕反查估算时间段。`
+    };
+} else if (noCaption && fullPromoHint.hit) {
+    aiResult = {
+        type: 'full_video_promo',
+        exist: true,
+        probability: Math.max(85, fullPromoHint.score),
+        pivot_sentence: '无',
+        start: '无',
+        end: '无',
+        note: `检测为整期推广/商单评测视频。${fullPromoHint.note}`
+    };
+} else {
+    aiResult = await callAI(videoInfo, danmakuText, topCommentInfo, workingCaptionsText, fullPromoHint);
+    aiResult = normalizeAiResult(aiResult);
+
+    if (shouldPreferInsertedAd(aiResult, videoInfo.duration || 0)) {
+        aiResult.type = 'inserted_ad';
+        aiResult.exist = true;
+        aiResult.note = `已检测到可定位的局部广告区间，优先按 inserted_ad 处理。` +
+            (aiResult.note ? ` 模型说明：${aiResult.note}` : '');
+    } else if (fullPromoHint.hit && aiResult.type !== 'full_video_promo' && !hasValidSegment(aiResult)) {
+        aiResult.type = 'full_video_promo';
+        aiResult.exist = true;
+        aiResult.probability = Math.max(aiResult.probability || 0, fullPromoHint.score || 85);
+        aiResult.start = '无';
+        aiResult.end = '无';
+        aiResult.pivot_sentence = '无';
+        aiResult.note = `规则判定为整期推广视频。${fullPromoHint.note}` +
+            (aiResult.note ? ` 模型补充：${aiResult.note}` : '');
+    } else if (commentHit && !aiResult.exist) {
+        aiResult.exist = true;
+        aiResult.probability = Math.max(aiResult.probability || 0, topCommentInfo.adAnalysis.score || 85);
+        if (aiResult.type === 'normal') aiResult.type = 'inserted_ad';
+        aiResult.note = `评论区强规则已判定为推广广告；规则说明：${topCommentInfo.adAnalysis.note}。` +
+            (aiResult.note ? ` 模型补充：${aiResult.note}` : '');
+    }
+}
+
+                GM_setValue(cacheKey, aiResult);
+            }
+
+            const settings = GM_getValue('ai_settings', DEFAULT_SETTINGS);
+            const finalResult = calculateFinalProbability(aiResult, settings);
+            showResultPopup(finalResult, displaySentData);
+
+            if (
+                finalResult.type === 'inserted_ad' &&
+                finalResult.exist &&
+                finalResult.finalProbability >= settings.probabilityThreshold &&
+                settings.defaultSkip &&
+                finalResult.start && finalResult.end &&
+                finalResult.start !== '无' && finalResult.end !== '无'
+            ) {
+                const endTime = timeStringToSeconds(finalResult.end);
+                clearSkipTimer();
+                skipTimer = setInterval(() => {
+                    const latestSettings = GM_getValue('ai_settings', DEFAULT_SETTINGS);
+                    if (!latestSettings.defaultSkip) {
+                        clearSkipTimer();
+                        return;
+                    }
+                    const videoPlayer = document.querySelector('video');
+                    if (!videoPlayer) return;
+                    const rawStart = timeStringToSeconds(finalResult.start) || 0;
+                    const startTime = rawStart > 15 ? rawStart - 6 : rawStart;
+                    if (videoPlayer.currentTime >= startTime && videoPlayer.currentTime < endTime) {
+                        showToast(`AI已为您跳过本段广告至 ${finalResult.end}`, 3000);
+                        videoPlayer.currentTime = endTime;
+                    }
+                }, 500);
+            } else if (
+                finalResult.type === 'full_video_promo' &&
+                finalResult.exist &&
+                finalResult.finalProbability >= settings.probabilityThreshold
+            ) {
+                showToast('检测到整期推广视频：本次仅提示，不自动跳过。', 3500);
+            }
+        } catch (error) {
+            console.error('分析脚本出错:', error);
+            showToast(`识别失败: ${error.message}`, 4000);
+        }
+    };
+
+    const createSettingsUI = () => {
+        const existing = document.querySelector('.bili-ai-skipper-settings-backdrop');
+        if (existing) return;
+
+        let settings = GM_getValue('ai_settings', DEFAULT_SETTINGS);
+        const backdrop = document.createElement('div');
+        backdrop.className = 'bili-ai-skipper-settings-backdrop';
+        if (settings.theme === 'dark') backdrop.classList.add('dark-theme');
+
+        backdrop.innerHTML = `
+        <div class="bili-ai-skipper-settings-modal">
+            <div class="bili-ai-skipper-settings-header">
+                <h2 class="bili-ai-skipper-settings-title">视频广告跳过器设置</h2>
+                <button class="bili-ai-skipper-settings-close">×</button>
+            </div>
+            <div class="bili-ai-skipper-settings-body">
+                <div class="bili-ai-skipper-settings-tabs">
+                    <button class="bili-ai-skipper-settings-tab active" data-tab="basic">基础设置</button>
+                    <button class="bili-ai-skipper-settings-tab" data-tab="advanced">高级设置</button>
+                    <button class="bili-ai-skipper-settings-tab" data-tab="prompt">提示词</button>
+                </div>
+
+                <div id="basic-tab" class="bili-ai-skipper-tab-content active">
+                    <div class="bili-ai-skipper-settings-section">
+                        <h3>API配置</h3>
+                        <div class="bili-ai-skipper-settings-group">
+                            <label class="bili-ai-skipper-settings-label">API提供商</label>
+                            <select id="api-provider" class="bili-ai-skipper-settings-select">
+                                <option value="custom" ${settings.apiProvider === 'custom' ? 'selected' : ''}>自定义OpenAI兼容 (如智谱等)</option>
+                                <option value="openai" ${settings.apiProvider === 'openai' ? 'selected' : ''}>OpenAI官方</option>
+                                <option value="deepseek" ${settings.apiProvider === 'deepseek' ? 'selected' : ''}>DeepSeek</option>
+                                <option value="gemini" ${settings.apiProvider === 'gemini' ? 'selected' : ''}>Google AI Studio (Gemini)</option>
+                                <option value="anthropic" ${settings.apiProvider === 'anthropic' ? 'selected' : ''}>Anthropic</option>
+                            </select>
+                        </div>
+                        <div class="bili-ai-skipper-settings-group" id="base-url-group">
+                            <label class="bili-ai-skipper-settings-label">API Base URL</label>
+                            <input type="text" id="base-url" class="bili-ai-skipper-settings-input">
+                        </div>
+                        <div class="bili-ai-skipper-settings-group">
+                            <label class="bili-ai-skipper-settings-label">API密钥</label>
+                            <input type="password" id="api-key" class="bili-ai-skipper-settings-input" placeholder="sk-...">
+                        </div>
+                        <div class="bili-ai-skipper-settings-group">
+                            <label class="bili-ai-skipper-settings-label">模型</label>
+                            <input type="text" id="model" class="bili-ai-skipper-settings-input" placeholder="如：glm-4.7-flash">
+                        </div>
+                    </div>
+
+                    <div class="bili-ai-skipper-settings-group">
+                        <label class="bili-ai-skipper-settings-label">备选模型 (可选，主模型失败时自动调用)</label>
+                        <input type="text" id="fallback-model" class="bili-ai-skipper-settings-input" placeholder="如：gemini-1.5-pro">
+                    </div>
+
+                    <div class="bili-ai-skipper-settings-section">
+                        <h3>跳过设置</h3>
+                        <div class="bili-ai-skipper-settings-checkbox">
+                            <input type="checkbox" id="default-skip" ${settings.defaultSkip ? 'checked' : ''}>
+                            <label for="default-skip">默认自动跳过广告</label>
+                        </div>
+                        <div class="bili-ai-skipper-settings-group-inline">
+                            <div>
+                                <label class="bili-ai-skipper-settings-label">触发跳过的概率阈值 (%)</label>
+                                <input type="number" id="probability-threshold" class="bili-ai-skipper-settings-input" min="0" max="100">
+                            </div>
+                            <div>
+                                <label class="bili-ai-skipper-settings-label">时长惩罚系数</label>
+                                <input type="number" id="duration-penalty" class="bili-ai-skipper-settings-input" min="0" max="50">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="advanced-tab" class="bili-ai-skipper-tab-content">
+                    <div class="bili-ai-skipper-settings-section">
+                        <h3>本地 ASR 兜底</h3>
+                        <div class="bili-ai-skipper-settings-checkbox">
+                            <input type="checkbox" id="enable-local-asr" ${settings.enableLocalAsr ? 'checked' : ''}>
+                            <label for="enable-local-asr">无官方字幕时调用本地 GPU ASR</label>
+                        </div>
+                        <div class="bili-ai-skipper-settings-group">
+                            <label class="bili-ai-skipper-settings-label">本地 ASR 接口地址</label>
+                            <input type="text" id="local-asr-url" class="bili-ai-skipper-settings-input" placeholder="http://127.0.0.1:5037/asr/transcribe">
+                        </div>
+                        <div class="bili-ai-skipper-settings-group-inline">
+                            <div>
+                                <label class="bili-ai-skipper-settings-label">最长识别视频时长 (分钟)</label>
+                                <input type="number" id="local-asr-max-video-minutes" class="bili-ai-skipper-settings-input" min="1" max="120">
+                            </div>
+                            <div>
+                                <label class="bili-ai-skipper-settings-label">本地 ASR 超时 (毫秒)</label>
+                                <input type="number" id="local-asr-timeout-ms" class="bili-ai-skipper-settings-input" min="10000" step="1000">
+                            </div>
+                        </div>
+                        <div class="bili-ai-skipper-settings-group">
+                            <label class="bili-ai-skipper-settings-label">本地 ASR 标识名</label>
+                            <input type="text" id="local-asr-provider-label" class="bili-ai-skipper-settings-input" placeholder="如：faster-whisper-medium">
+                            <small style="color:var(--text-secondary);font-size:12px;">仅用于调试展示，方便区分你本地跑的是哪个模型。</small>
+                        </div>
+                    </div>
+
+                    <div class="bili-ai-skipper-settings-section">
+                        <h3>广告时长限制</h3>
+                        <div class="bili-ai-skipper-settings-group-inline">
+                            <div>
+                                <label class="bili-ai-skipper-settings-label">最小广告时长 (秒)</label>
+                                <input type="number" id="min-ad-duration" class="bili-ai-skipper-settings-input">
+                            </div>
+                            <div>
+                                <label class="bili-ai-skipper-settings-label">最大广告时长 (秒)</label>
+                                <input type="number" id="max-ad-duration" class="bili-ai-skipper-settings-input">
+                            </div>
+                        </div>
+                        <div class="bili-ai-skipper-settings-group">
+                            <label class="bili-ai-skipper-settings-label">最大弹幕数量 (用于分析)</label>
+                            <input type="number" id="max-danmaku-count" class="bili-ai-skipper-settings-input">
+                            <small style="color:var(--text-secondary);font-size:12px;">提示：弹幕过多会占用Token，导致模型忽略更重要的字幕内容。</small>
+                        </div>
+                    </div>
+
+                    <div class="bili-ai-skipper-settings-section">
+                        <h3>白名单设置 (仅分析含关键词弹幕)</h3>
+                        <div class="bili-ai-skipper-settings-checkbox">
+                            <input type="checkbox" id="enable-whitelist" ${settings.enableWhitelist ? 'checked' : ''}>
+                            <label for="enable-whitelist">启用白名单</label>
+                        </div>
+                        <div class="bili-ai-skipper-list-container">
+                            <div class="bili-ai-skipper-list-input">
+                                <input type="text" id="whitelist-input" placeholder="输入白名单关键词">
+                                <button class="bili-ai-skipper-list-add-btn" id="add-whitelist">添加</button>
+                            </div>
+                            <div class="bili-ai-skipper-list-items" id="whitelist-items"></div>
+                        </div>
+                    </div>
+
+                    <div class="bili-ai-skipper-settings-section">
+                        <h3>黑名单设置 (过滤干扰弹幕)</h3>
+                        <div class="bili-ai-skipper-settings-checkbox">
+                            <input type="checkbox" id="enable-blacklist" ${settings.enableBlacklist ? 'checked' : ''}>
+                            <label for="enable-blacklist">启用黑名单</label>
+                        </div>
+                        <div class="bili-ai-skipper-list-container">
+                            <div class="bili-ai-skipper-list-input">
+                                <input type="text" id="blacklist-input" placeholder="输入黑名单关键词">
+                                <button class="bili-ai-skipper-list-add-btn" id="add-blacklist">添加</button>
+                            </div>
+                            <div class="bili-ai-skipper-list-items" id="blacklist-items"></div>
+                        </div>
+                    </div>
+
+                    <div class="bili-ai-skipper-settings-section">
+                        <h3>数据管理</h3>
+                        <div class="bili-ai-skipper-settings-group">
+                            <button class="bili-ai-skipper-settings-btn-secondary" id="clear-cache-btn" style="color:var(--danger-color);border-color:var(--danger-color);">🗑️ 清除所有视频AI缓存</button>
+                            <small style="color:var(--text-secondary);font-size:12px;display:block;margin-top:5px;">修改提示词或规则后，请清除旧缓存，否则新逻辑可能不生效。</small>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="prompt-tab" class="bili-ai-skipper-tab-content">
+                    <div class="bili-ai-skipper-settings-section">
+                        <h3>AI提示词配置</h3>
+                        <div class="bili-ai-skipper-settings-group">
+                            <label class="bili-ai-skipper-settings-label">系统提示词 (System Prompt)</label>
+                            <textarea id="agent-prompt" class="bili-ai-skipper-settings-textarea"></textarea>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="bili-ai-skipper-settings-footer">
+                <div class="bili-ai-skipper-theme-toggle">
+                    <button class="bili-ai-skipper-theme-btn" id="theme-light" title="浅色">☀</button>
+                    <button class="bili-ai-skipper-theme-btn" id="theme-dark" title="深色">🌙</button>
+                </div>
+                <div class="bili-ai-skipper-settings-actions">
+                    <button class="bili-ai-skipper-settings-btn-secondary" id="cancel-btn">取消</button>
+                    <button class="bili-ai-skipper-settings-btn-primary" id="save-btn">保存并刷新</button>
+                </div>
+            </div>
+        </div>`;
+        document.body.appendChild(backdrop);
+
+        const $ = selector => backdrop.querySelector(selector);
+        const cleanupDrag = makeDraggable($('.bili-ai-skipper-settings-modal'), $('.bili-ai-skipper-settings-header'));
+        const readNumber = (selector, fallback, parser = Number) => {
+            const raw = $(selector).value.trim();
+            if (raw === '') return fallback;
+            const value = parser(raw);
+            return Number.isNaN(value) ? fallback : value;
+        };
+        const closeSettings = () => {
+            cleanupDrag();
+            backdrop.remove();
+        };
+
+        $('#base-url').value = settings.baseUrl || '';
+        $('#api-key').value = settings.apiKey || '';
+        $('#model').value = settings.model || '';
+        $('#fallback-model').value = settings.fallbackModel || '';
+        $('#probability-threshold').value = String(settings.probabilityThreshold ?? 70);
+        $('#duration-penalty').value = String(settings.durationPenalty ?? 5);
+        $('#local-asr-url').value = settings.localAsrUrl || '';
+        $('#local-asr-max-video-minutes').value = String(settings.localAsrMaxVideoMinutes ?? 20);
+        $('#local-asr-timeout-ms').value = String(settings.localAsrTimeoutMs ?? 180000);
+        $('#local-asr-provider-label').value = settings.localAsrProviderLabel || '';
+        $('#min-ad-duration').value = String(settings.minAdDuration ?? 20);
+        $('#max-ad-duration').value = String(settings.maxAdDuration ?? 300);
+        $('#max-danmaku-count').value = String(settings.maxDanmakuCount ?? 250);
+        $('#agent-prompt').value = settings.agentPrompt || '';
+
+        const tabs = backdrop.querySelectorAll('.bili-ai-skipper-settings-tab');
+        const contents = backdrop.querySelectorAll('.bili-ai-skipper-tab-content');
+        tabs.forEach(tab => tab.addEventListener('click', () => {
+            tabs.forEach(t => t.classList.remove('active'));
+            contents.forEach(c => c.classList.remove('active'));
+            tab.classList.add('active');
+            $(`#${tab.dataset.tab}-tab`).classList.add('active');
+        }));
+
+        const setupListManagement = type => {
+            const itemsContainer = $(`#${type}-items`);
+            const input = $(`#${type}-input`);
+            const addButton = $(`#add-${type}`);
+            let list = Array.isArray(settings[type]) ? [...settings[type]] : [];
+
+            const render = () => {
+                itemsContainer.innerHTML = '';
+                list.forEach((item, index) => {
+                    const div = document.createElement('div');
+                    const text = document.createElement('span');
+                    const btn = document.createElement('button');
+                    div.className = 'bili-ai-skipper-list-item';
+                    text.textContent = item;
+                    btn.className = 'bili-ai-skipper-list-remove-btn';
+                    btn.dataset.index = String(index);
+                    btn.type = 'button';
+                    btn.textContent = '×';
+                    div.appendChild(text);
+                    div.appendChild(btn);
+                    itemsContainer.appendChild(div);
+                });
+                itemsContainer.querySelectorAll('.bili-ai-skipper-list-remove-btn').forEach(btn => btn.addEventListener('click', e => {
+                    list.splice(parseInt(e.currentTarget.dataset.index, 10), 1);
+                    render();
+                }));
+            };
+
+            addButton.addEventListener('click', () => {
+                const val = input.value.trim();
+                if (val && !list.includes(val)) {
+                    list.push(val);
+                    input.value = '';
+                    render();
+                }
+            });
+            input.addEventListener('keydown', e => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addButton.click();
+                }
+            });
+            render();
+            return () => list;
+        };
+
+        const getWhitelist = setupListManagement('whitelist');
+        const getBlacklist = setupListManagement('blacklist');
+
+        const apiProviderSelect = $('#api-provider');
+        const baseUrlGroup = $('#base-url-group');
+        const updateApiProviderUI = () => baseUrlGroup.style.display = apiProviderSelect.value === 'custom' ? 'block' : 'none';
+        apiProviderSelect.addEventListener('change', updateApiProviderUI);
+        updateApiProviderUI();
+
+        $('#theme-light').addEventListener('click', () => { settings.theme = 'light'; backdrop.classList.remove('dark-theme'); });
+        $('#theme-dark').addEventListener('click', () => { settings.theme = 'dark'; backdrop.classList.add('dark-theme'); });
+
+        $('#clear-cache-btn').addEventListener('click', () => {
+            if (!confirm('确定要清除所有视频的 AI 分析记忆吗？\n\n清除后重新打开视频将消耗 Token 重新分析。')) return;
+            const keys = GM_listValues();
+            let count = 0;
+            keys.forEach(k => {
+                if (k.startsWith('bili_ai_skipper_cache_')) {
+                    GM_deleteValue(k);
+                    count++;
+                }
+            });
+            showToast(`✅ 成功清除了 ${count} 个视频的缓存数据！`, 3000);
+        });
+
+        $('#cancel-btn').addEventListener('click', closeSettings);
+        $('.bili-ai-skipper-settings-close').addEventListener('click', closeSettings);
+
+        $('#save-btn').addEventListener('click', () => {
+            const newSettings = {
+                ...settings,
+                apiProvider: $('#api-provider').value,
+                baseUrl: $('#base-url').value,
+                apiKey: $('#api-key').value,
+                model: $('#model').value,
+                fallbackModel: $('#fallback-model').value,
+                defaultSkip: $('#default-skip').checked,
+                enableLocalAsr: $('#enable-local-asr').checked,
+                localAsrUrl: $('#local-asr-url').value.trim(),
+                localAsrMaxVideoMinutes: readNumber('#local-asr-max-video-minutes', 20, Number.parseInt),
+                localAsrTimeoutMs: readNumber('#local-asr-timeout-ms', 180000, Number.parseInt),
+                localAsrProviderLabel: $('#local-asr-provider-label').value.trim(),
+                probabilityThreshold: readNumber('#probability-threshold', 70, Number.parseInt),
+                durationPenalty: readNumber('#duration-penalty', 5, Number.parseFloat),
+                minAdDuration: readNumber('#min-ad-duration', 20, Number.parseInt),
+                maxAdDuration: readNumber('#max-ad-duration', 300, Number.parseInt),
+                maxDanmakuCount: readNumber('#max-danmaku-count', 250, Number.parseInt),
+                enableWhitelist: $('#enable-whitelist').checked,
+                whitelist: getWhitelist(),
+                enableBlacklist: $('#enable-blacklist').checked,
+                blacklist: getBlacklist(),
+                agentPrompt: $('#agent-prompt').value
+            };
+            GM_setValue('ai_settings', newSettings);
+            showToast('设置已保存，即将刷新...', 2000);
+            setTimeout(() => location.reload(), 500);
+        });
+    };
+
+    const init = () => {
+        injectStyles();
+        const settings = GM_getValue('ai_settings', DEFAULT_SETTINGS);
+
+        const floatingBtn = document.createElement('div');
+        floatingBtn.className = 'bili-ai-skipper-floating-btn';
+        if (settings.theme === 'dark') floatingBtn.classList.add('dark-theme');
+        floatingBtn.style.left = settings.floatingPosition.x + 'px';
+        floatingBtn.style.top = settings.floatingPosition.y + 'px';
+        floatingBtn.innerHTML = `<img src="${settingsIconBase64}" alt="AI">`;
+        document.body.appendChild(floatingBtn);
+        makeDraggable(floatingBtn, floatingBtn);
+
+        floatingBtn.addEventListener('dblclick', createSettingsUI);
+
+        urlCheckInterval = setInterval(() => {
+            const m = window.location.pathname.match(/video\/(BV[1-9A-HJ-NP-Za-km-z]+)/);
+            const newBvid = m ? m[1] : null;
+            if (newBvid && newBvid !== currentBvid) {
+                clearSkipTimer();
+                const popup = document.querySelector('.bili-ai-skipper-result-popup');
+                if (popup) {
+                    if (typeof popup.__dragCleanup === 'function') popup.__dragCleanup();
+                    popup.remove();
+                }
+                currentBvid = newBvid;
+                if (settings.apiKey && settings.model) main();
+            }
+        }, 1500);
+
+        if (!settings.apiKey || !settings.model) showToast('欢迎！请【双击左上角齿轮图标】配置大模型', 5000);
+    };
+
+    if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', init);
+    else init();
+})();
