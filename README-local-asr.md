@@ -12,7 +12,6 @@
 
 ## 适合的机器
 
-- NVIDIA RTX 4060 8GB
 - Windows + Python 3.10/3.11
 
 ## 安装
